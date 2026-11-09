@@ -463,6 +463,21 @@ Ausnahme** einzuführen:
 - Nur für Downloads, die SealFlash selbst macht. Bei „Eigenes Image“ ist die Herkunft unbekannt,
   dort bleibt die Prüfsumme Pflicht.
 
+### E54 – Windows-Modus: Dateien als ein fortlaufender Datenstrom schreiben (0.4.1)
+- Problem: Beim Kopieren einer Windows-ISO fiel die Geschwindigkeit oft auf 3–5 MB/s. Die ISO
+  enthält Hunderte kleine Dateien (`.mui`, `.dll`). Jede endete mitten in einem Sektor, deshalb
+  - las der Block-Cache diesen Sektor erst vom Stick (ein Lesezugriff pro Datei) und
+  - schrieb jede Datei einzeln, weil zwischen zwei Dateien der ungenutzte Rest des Clusters lag.
+  Mit `FILE_FLAG_WRITE_THROUGH` wartet jeder dieser kleinen Zugriffe einzeln auf den Stick.
+- Lösung: Der Rest des letzten Clusters jeder Datei wird mit Nullen aufgefüllt und im selben
+  Zugriff geschrieben. Da der FAT32-Plan die Dateien lückenlos hintereinander legt, entsteht ein
+  einziger fortlaufender Datenstrom. Der Block-Cache (jetzt 4-MiB-Blöcke, 16 Stück = 64 MB RAM)
+  schreibt ihn in großen Stücken.
+- Ergebnis im Test (400 kleine Dateien, 4-KB-Cluster): vorher 401 Lese- und 375 Schreibzugriffe,
+  jetzt 0 Lese- und 4 Schreibzugriffe (`many_small_files_are_written_in_large_sequential_chunks`).
+- Die Nullen liegen hinter dem Dateiende im eigenen Cluster der Datei. Sie gehören nicht zum
+  Dateiinhalt, an der Prüfung (Hash über die Dateigröße) ändert sich nichts.
+
 ## Offene Punkte
 - **Kompatibilität des Online-Katalogs:** Wegen `deny_unknown_fields` lehnt eine ältere App einen
   Katalog mit neuen Feldern ab (z. B. `allow_v3`) und fällt auf ihren Cache zurück. Neue Felder darf

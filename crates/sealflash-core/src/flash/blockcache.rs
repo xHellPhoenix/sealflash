@@ -4,7 +4,9 @@
 //! sektor-ausgerichtete Puffer und Längen. `fatfs` schreibt aber beliebige Häppchen
 //! (32-Byte-Verzeichniseinträge, einzelne FAT-Einträge, Cluster). Dieser Cache übersetzt:
 //!
-//! - Das Gerät wird in Blöcke zu 1 MiB geteilt; die zuletzt benutzten liegen im RAM (LRU).
+//! - Das Gerät wird in Blöcke zu 4 MiB geteilt; die zuletzt benutzten liegen im RAM (LRU).
+//!   Große Blöcke = große Schreibzugriffe: USB-Sticks sind bei vielen kleinen Zugriffen
+//!   ein Vielfaches langsamer als bei wenigen großen.
 //! - Je 512-Byte-Sektor merkt er sich „gültig“ (vom Gerät gelesen oder ganz beschrieben) und
 //!   „geändert“. Ein Sektor wird nur dann vom Gerät gelesen, wenn er teilweise beschrieben oder
 //!   gelesen wird. Fortlaufendes Schreiben (Dateiinhalte) kommt so ganz ohne Lesen aus.
@@ -15,7 +17,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use super::write::{AlignedBuf, Device};
 
 pub const SECTOR: usize = 512;
-const BLOCK: usize = 1024 * 1024;
+const BLOCK: usize = 4 * 1024 * 1024;
 const SECTORS_PER_BLOCK: usize = BLOCK / SECTOR;
 
 struct Slot {

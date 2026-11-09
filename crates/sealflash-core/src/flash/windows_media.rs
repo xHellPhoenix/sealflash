@@ -284,7 +284,7 @@ pub fn write_windows_media<D: Device>(
     let total: u64 = files.iter().map(|f| f.size).sum();
     check()?;
 
-    let mut cache = BlockCache::new(dev, disk_size, 32);
+    let mut cache = BlockCache::new(dev, disk_size, 16);
     let result = (|| -> Result<FlashReport, FlashError> {
         // 2) Partitionstabelle
         on_event(FlashEvent::Stage {
@@ -342,6 +342,13 @@ pub fn write_windows_media<D: Device>(
                 on_event: &mut *on_event,
             };
             let mut buf = vec![0u8; COPY_CHUNK];
+            // Den Rest des letzten Clusters jeder Datei mit Nullen füllen. Die Dateien liegen
+            // direkt hintereinander, so entsteht ein einziger fortlaufender Datenstrom: Der
+            // Block-Cache schreibt dann ganze Blöcke am Stück und muss nie einen angeschnittenen
+            // Sektor vom Stick nachlesen. Ohne das wurde jede kleine Datei einzeln geschrieben
+            // (plus ein Lesezugriff) – bei Windows-ISOs mit Hunderten .mui/.dll-Dateien sehr langsam.
+            let bpc = plan.bytes_per_cluster;
+            debug_assert!((COPY_CHUNK as u64).is_multiple_of(bpc));
             for (item, place) in files.iter().zip(&plan.files) {
                 check()?;
                 let mut src = item.src.open().map_err(io_err)?;
@@ -350,14 +357,29 @@ pub fn write_windows_media<D: Device>(
                 let mut copied = 0u64;
                 loop {
                     check()?;
-                    let n = src.read(&mut buf).map_err(io_err)?;
+                    // Puffer ganz füllen (`read` liefert manchmal weniger), damit jeder
+                    // Schreibzugriff ein Vielfaches der Clustergröße ist.
+                    let mut n = 0;
+                    while n < buf.len() {
+                        let r = src.read(&mut buf[n..]).map_err(io_err)?;
+                        if r == 0 {
+                            break;
+                        }
+                        n += r;
+                    }
                     if n == 0 {
                         break;
                     }
-                    part.write_all(&buf[..n]).map_err(io_err)?;
                     h.update(&buf[..n]);
                     copied += n as u64;
                     p.add(n as u64);
+                    // Letztes Stück: Rest des Clusters mit Nullen auffüllen, im selben Zugriff.
+                    let padded = (n as u64).div_ceil(bpc) * bpc;
+                    buf[n..padded as usize].fill(0);
+                    part.write_all(&buf[..padded as usize]).map_err(io_err)?;
+                    if n < buf.len() {
+                        break;
+                    }
                 }
                 if copied != item.size {
                     return Err(FlashError::Io(format!(
