@@ -362,3 +362,103 @@ fn answer_file_is_written_to_stick_root() {
         );
     }
 }
+
+/// Zählt Zugriffe auf das „Gerät“ – getrennt vor und nach Beginn der Zurücklese-Prüfung.
+struct Counting {
+    f: File,
+    stats: std::rc::Rc<std::cell::RefCell<Stats>>,
+}
+#[derive(Default, Debug)]
+struct Stats {
+    readback: bool,
+    reads_before_readback: u64,
+    writes: u64,
+    smallest_write: Option<usize>,
+}
+impl Read for Counting {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let mut s = self.stats.borrow_mut();
+        if !s.readback {
+            s.reads_before_readback += 1;
+        }
+        self.f.read(buf)
+    }
+}
+impl Write for Counting {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.f.write(buf)?;
+        let mut s = self.stats.borrow_mut();
+        if !s.readback {
+            s.writes += 1;
+        }
+        s.smallest_write = Some(s.smallest_write.map_or(n, |m| m.min(n)));
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.f.flush()
+    }
+}
+impl Seek for Counting {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.f.seek(pos)
+    }
+}
+impl sealflash_core::flash::write::Device for Counting {
+    fn sync(&mut self) -> std::io::Result<()> {
+        self.f.sync_all()
+    }
+}
+
+/// Echte Windows-ISOs haben Hunderte kleine Dateien. Die dürfen nicht einzeln (und mit
+/// Lesezugriff für den angeschnittenen letzten Sektor) geschrieben werden – das macht
+/// langsame USB-Sticks quälend langsam.
+#[test]
+fn many_small_files_are_written_in_large_sequential_chunks() {
+    let d = dir("manysmall");
+    let iso = d.join("iso");
+    fs::create_dir_all(iso.join("sources/de-de")).unwrap();
+    fs::create_dir_all(iso.join("efi/boot")).unwrap();
+    fs::write(iso.join("bootmgr"), noise(400_000, 1)).unwrap();
+    fs::write(iso.join("efi/boot/bootx64.efi"), noise(2_000_000, 2)).unwrap();
+    for i in 0..400u32 {
+        // 1–20 KB, krumme Größen wie bei echten .dll/.mui-Dateien
+        let len = 1000 + (i as usize * 7919) % 19_000;
+        fs::write(
+            iso.join(format!("sources/de-de/f{i}.mui")),
+            noise(len, i + 10),
+        )
+        .unwrap();
+    }
+    // ≥ 260 MB → 4-KB-Cluster wie auf echten Sticks (darunter 512 Byte, dann gäbe es keine Lücken)
+    let size = 512 * MB;
+    let stats = std::rc::Rc::new(std::cell::RefCell::new(Stats::default()));
+    let dev = Counting {
+        f: stick(&d, size),
+        stats: stats.clone(),
+    };
+    let opts = MediaOptions::new(d.join("tmp"));
+    let s2 = stats.clone();
+    write_windows_media(dev, size, &iso, &opts, &AtomicBool::new(false), &mut |e| {
+        if let FlashEvent::Stage {
+            stage: FlashStage::Readback,
+        } = e
+        {
+            s2.borrow_mut().readback = true;
+        }
+    })
+    .unwrap();
+
+    let s = stats.borrow();
+    eprintln!("{s:?}");
+    assert_eq!(
+        s.reads_before_readback, 0,
+        "beim Schreiben nichts vom Stick lesen"
+    );
+    // ~6 MB Dateien + FAT/Verzeichnisse: wenige große Schreibzugriffe statt Hunderte kleine.
+    assert!(
+        s.writes < 40,
+        "zu viele einzelne Schreibzugriffe: {}",
+        s.writes
+    );
+    let _ = fs::remove_dir_all(&d);
+}
