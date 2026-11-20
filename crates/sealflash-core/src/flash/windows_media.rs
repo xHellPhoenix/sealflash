@@ -156,11 +156,20 @@ fn split_wim(item: &Item, opts: &MediaOptions) -> Result<Vec<Item>, FlashError> 
             "install.wim liegt nicht als Datei vor".into(),
         ));
     };
-    let out = Command::new(wimlib)
-        .arg("split")
+    let mut cmd = Command::new(wimlib);
+    cmd.arg("split")
         .arg(wim)
         .arg(out_dir.join("install.swm"))
-        .arg(opts.split_part_mib.to_string())
+        .arg(opts.split_part_mib.to_string());
+    // Windows: Ohne dieses Flag öffnet ein Konsolenprogramm aus einer Fenster-App heraus ein
+    // eigenes schwarzes Konsolenfenster. Die Ausgabe lesen wir ohnehin selbst (`output()`).
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = cmd
         .output()
         .map_err(|e| FlashError::Io(format!("wimlib-imagex lässt sich nicht starten: {e}")))?;
     if !out.status.success() {
